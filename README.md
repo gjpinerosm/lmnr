@@ -53,17 +53,19 @@ Laminar self-hosted para observar a Claude Code: cuánto consume cada agente y q
 
 Requisitos: Docker, Node 26, Python 3 y `jq`.
 
-**1. El stack** (Postgres, ClickHouse, RabbitMQ, Quickwit, app-server y frontend oficial):
+**1. El stack** (Postgres, ClickHouse, RabbitMQ, Quickwit, app-server y el frontend del fork):
 
 ```sh
 docker compose up -d
 ```
 
-- La UI oficial queda en http://localhost:5667. **Esa imagen no trae la página Agent graph**: para verla, usar el frontend de desarrollo del paso 2.
-- `docker-compose.override.yml` se aplica solo y publica ClickHouse en `127.0.0.1:8123` para el frontend de desarrollo.
+- La UI queda en http://localhost:5667, **con la página Agent graph**. `docker-compose.override.yml` se aplica solo y reemplaza la imagen oficial por `lmnr-frontend:local`, construida desde `frontend/`. La primera vez tarda varios minutos (necesita ~4 GB de RAM en Docker).
+- Después de actualizar el código: `docker compose up -d --build frontend`.
+- Para volver a la imagen oficial: quitar `build`, `image` y `pull_policy` del servicio `frontend` en el override y correr `docker compose up -d frontend`.
+- El override también publica ClickHouse en `127.0.0.1:8123`, para el frontend de desarrollo del paso 2.
 - `.env` en la raíz lleva las credenciales (`POSTGRES_*`, `CLICKHOUSE_*`, `RABBITMQ_DEFAULT_*`, `SHARED_SECRET_TOKEN`, `AEAD_SECRET_KEY`, `NEXTAUTH_SECRET`).
 
-**2. Frontend con Agent graph** (puerto 3000):
+**2. Frontend de desarrollo** (opcional, para editar el código; puerto 3000):
 
 ```sh
 cd frontend
@@ -78,20 +80,21 @@ En `frontend/.env.local`, con los mismos valores del `.env` de la raíz:
 - `BETTER_AUTH_URL`, `NEXTAUTH_URL` y `NEXT_PUBLIC_URL` en `http://localhost:3000`;
 - `NEXTAUTH_SECRET` y `BETTER_AUTH_SECRET` iguales al `NEXTAUTH_SECRET` del compose, para que una sesión sirva en los dos frontends.
 
-Abrir http://localhost:3000, iniciar sesión con el correo y entrar a *Agent graph* en el proyecto donde exporta el plugin. El selector de proyecto en vivo usa por defecto el proyecto llamado `claude-live`.
+En :5667 (o :3000 en desarrollo), iniciar sesión con el correo y entrar a *Agent graph* en el proyecto donde exporta el plugin. El selector de proyecto en vivo usa por defecto el proyecto llamado `claude-live`.
 
 **3. Datos de Claude Code:**
 - **Histórico:** plugin `lmnr@lmnr` apuntando a `http://localhost:8000` con la clave del proyecto (por ejemplo `dev`). Hooks recomendados: [`tools/claude-code-lmnr/README.md`](tools/claude-code-lmnr/README.md).
 - **En vivo:** crear el proyecto `claude-live` y su clave, y seguir [`tools/claude-code-live/README.md`](tools/claude-code-live/README.md). El daemon arranca solo en cada `SessionStart`; `python3 ~/.claude/hooks/claude-live/claude_live.py status` muestra qué ve.
 
-**4. Desde otros equipos de la red (opcional):** agregar en `frontend/.env.local` y reiniciar el paso 2:
+**4. Desde otros equipos de la red (opcional):** en el `.env` de la raíz:
 
 ```sh
-ALLOWED_DEV_ORIGINS=<ip-del-mac>
-BETTER_AUTH_TRUSTED_ORIGINS=http://<ip-del-mac>:3000
+LAN_TRUSTED_ORIGINS=http://<ip-del-mac>:5667
 ```
 
-y abrir `http://<ip-del-mac>:3000`. El login local solo pide un correo, así que cualquiera en la red puede entrar como cualquier usuario: usarlo solo en una red de confianza (SEC-4).
+y `docker compose up -d frontend`. Luego abrir `http://<ip-del-mac>:5667`. Para el frontend de desarrollo, en cambio, van `ALLOWED_DEV_ORIGINS=<ip-del-mac>` y `BETTER_AUTH_TRUSTED_ORIGINS=http://<ip-del-mac>:3000` en `frontend/.env.local`.
+
+El login local solo pide un correo, así que cualquiera en la red puede entrar como cualquier usuario: usarlo solo en una red de confianza (SEC-4). Para cerrarlo, borrar la variable y recrear el frontend.
 
 **Tests:**
 
@@ -100,7 +103,7 @@ y abrir `http://<ip-del-mac>:3000`. El login local solo pide un correo, así que
 python3 -m unittest tools/claude-code-live/test_claude_live.py
 ```
 
-**Apagar:** `docker compose down` (los datos quedan en los volúmenes) y `Ctrl+C` en el frontend de desarrollo.
+**Apagar:** `docker compose down` (los datos quedan en los volúmenes) y, si corre, `Ctrl+C` en el frontend de desarrollo.
 
 ## Documentation
 
