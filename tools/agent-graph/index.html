@@ -1,0 +1,174 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Grafo de agentes · Laminar</title>
+<script src="https://cdn.jsdelivr.net/npm/cytoscape@3.35.0/dist/cytoscape.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/cytoscape-dagre@4.1.0/dist/cytoscape-dagre.min.js"></script>
+<style>
+  :root {
+    --bg: #fbfaf8; --panel: #ffffff; --ink: #1d1d1b; --muted: #6b6a66; --line: #e4e2dd;
+    --main: #c2410c; --tool: #9a9892; --edge: #b9b6ae; --accent: #1d4ed8;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg: #161615; --panel: #1f1f1d; --ink: #ecebe7; --muted: #9b9a95; --line: #34332f;
+            --main: #fb923c; --tool: #77756f; --edge: #57554f; --accent: #93b4ff; }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; font: 14px/1.4 ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+         background: var(--bg); color: var(--ink); display: grid; grid-template-rows: auto 1fr; height: 100vh; }
+  header { display: flex; flex-wrap: wrap; gap: 16px 28px; align-items: center; padding: 12px 18px;
+           border-bottom: 1px solid var(--line); background: var(--panel); }
+  h1 { font-size: 15px; margin: 0; font-weight: 600; }
+  .stats { display: flex; gap: 20px; color: var(--muted); font-variant-numeric: tabular-nums; }
+  .stats b { color: var(--ink); font-weight: 600; }
+  .controls { display: flex; gap: 12px; align-items: center; margin-left: auto; flex-wrap: wrap; }
+  .controls label { color: var(--muted); display: flex; gap: 6px; align-items: center; }
+  select, input[type=search] { font: inherit; color: var(--ink); background: var(--bg);
+           border: 1px solid var(--line); border-radius: 6px; padding: 4px 8px; }
+  main { display: grid; grid-template-columns: 1fr 300px; min-height: 0; }
+  #cy { min-height: 0; }
+  aside { border-left: 1px solid var(--line); background: var(--panel); padding: 16px 18px; overflow: auto; }
+  aside h2 { font-size: 13px; margin: 0 0 10px; font-weight: 600; white-space: pre-line; }
+  aside dl { display: grid; grid-template-columns: auto 1fr; gap: 6px 12px; margin: 0;
+             font-variant-numeric: tabular-nums; }
+  aside dt { color: var(--muted); }
+  aside dd { margin: 0; text-align: right; }
+  .hint { color: var(--muted); }
+  .legend { margin-top: 22px; display: grid; gap: 6px; }
+  .legend span { display: inline-block; width: 10px; height: 10px; border-radius: 50%; margin-right: 8px; }
+  #empty { padding: 40px; color: var(--muted); }
+</style>
+</head>
+<body>
+<header>
+  <h1>Grafo de agentes</h1>
+  <div class="stats" id="stats"></div>
+  <div class="controls">
+    <label>Tamaño <select id="metric"><option value="self_tokens">tokens</option><option value="self_cost">costo</option><option value="llm_calls">llamadas LLM</option></select></label>
+    <label>Dirección <select id="dir"><option value="LR">→</option><option value="TB">↓</option></select></label>
+    <label><input type="checkbox" id="tools"> tools</label>
+    <input type="search" id="q" placeholder="Filtrar agente…">
+  </div>
+</header>
+<main>
+  <div id="cy"></div>
+  <aside id="side"><p class="hint">Haz clic en un nodo o arista para ver su consumo.</p><div class="legend" id="legend"></div></aside>
+</main>
+<script>
+const GRAPH = /*__GRAPH_DATA__*/null;
+const css = (v) => getComputedStyle(document.documentElement).getPropertyValue(v).trim();
+const fmtInt = (n) => Math.round(n).toLocaleString("es-CO");
+const fmtTok = (n) => n >= 1e9 ? (n / 1e9).toFixed(2) + " B" : n >= 1e6 ? (n / 1e6).toFixed(1) + " M" : n >= 1e3 ? (n / 1e3).toFixed(1) + " k" : String(n);
+const fmtUsd = (n) => "$" + n.toLocaleString("es-CO", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+
+if (!GRAPH) {
+  document.getElementById("cy").innerHTML = '<p id="empty">Sin datos. Genera el visor con <code>python3 extract.py</code>.</p>';
+  throw new Error("no graph data");
+}
+
+// Stable categorical color per agent type (golden-angle hue walk; main/tool have fixed colors).
+const types = [...new Set(GRAPH.nodes.filter((n) => n.kind === "subagent").map((n) => n.agent_type))].sort();
+const typeColor = Object.fromEntries(types.map((t, i) => [t, `hsl(${Math.round((i * 137.508 + 200) % 360)}, 55%, 52%)`]));
+const colorOf = (n) => n.kind === "main" ? css("--main") : n.kind === "tool" ? css("--tool") : typeColor[n.agent_type];
+
+const m = GRAPH.meta;
+document.getElementById("stats").innerHTML =
+  `<span><b>${m.sessions}</b> sesiones</span><span><b>${fmtInt(m.traces)}</b> turnos</span>` +
+  `<span><b>${fmtInt(m.llm_calls)}</b> llamadas LLM</span><span><b>${fmtTok(m.total_tokens)}</b> tokens</span>` +
+  `<span><b>${fmtUsd(m.total_cost)}</b></span><span>vista: <b>${m.mode === "types" ? "por tipo" : "por sesión"}</b></span>`;
+document.getElementById("legend").innerHTML =
+  `<div><span style="background:${css("--main")}"></span>agente principal</div>` +
+  types.map((t) => `<div><span style="background:${typeColor[t]}"></span>${t}</div>`).join("") +
+  `<div><span style="background:${css("--tool")}"></span>tool</div>`;
+
+const cy = cytoscape({
+  container: document.getElementById("cy"),
+  wheelSensitivity: 0.25,
+  elements: [
+    ...GRAPH.nodes.map((n) => ({ data: { ...n, color: colorOf(n) } })),
+    ...GRAPH.edges.map((e, i) => ({ data: { id: "e" + i, ...e } })),
+  ],
+  style: [
+    { selector: "node", style: {
+        "background-color": "data(color)", label: "data(label)", "text-wrap": "wrap", "text-max-width": 160,
+        "font-size": 11, color: css("--ink"), "text-valign": "bottom", "text-margin-y": 5,
+        "text-background-color": css("--bg"), "text-background-opacity": 0.85, "text-background-padding": 2 } },
+    { selector: "node[kind = 'main']", style: { shape: "round-rectangle", "font-weight": 600 } },
+    { selector: "node[kind = 'tool']", style: { shape: "diamond", "font-size": 9 } },
+    { selector: "edge", style: {
+        "curve-style": "bezier", "target-arrow-shape": "triangle", "arrow-scale": 0.8,
+        "line-color": css("--edge"), "target-arrow-color": css("--edge"), opacity: 0.85 } },
+    { selector: ".faded", style: { opacity: 0.12 } },
+    { selector: ":selected", style: { "border-width": 3, "border-color": css("--accent"),
+        "line-color": css("--accent"), "target-arrow-color": css("--accent") } },
+  ],
+});
+
+function sizeBy(metric) {
+  const vals = cy.nodes().map((n) => n.data(metric) || 0);
+  const max = Math.max(1, ...vals);
+  // sqrt scale: node area, not radius, tracks the metric.
+  cy.nodes().forEach((n) => {
+    const d = 18 + 70 * Math.sqrt((n.data(metric) || 0) / max);
+    n.style({ width: d, height: d });
+  });
+  const lmax = Math.max(1, ...cy.edges().map((e) => e.data("launches")));
+  cy.edges().forEach((e) => e.style("width", 1 + 7 * Math.sqrt(e.data("launches") / lmax)));
+}
+
+function relayout() {
+  cy.elements(":visible").layout({ name: "dagre", rankDir: document.getElementById("dir").value, nodeSep: 45, rankSep: 160,
+              animate: false, fit: true, padding: 30 }).run();
+}
+
+function showNode(d) {
+  const rows = d.kind === "tool"
+    ? [["Llamadas", fmtInt(d.tool_calls)]]
+    : [["Tokens propios", fmtInt(d.self_tokens)], ["Costo propio", fmtUsd(d.self_cost)],
+       ...(m.mode === "session" ? [["Tokens con subagentes", fmtInt(d.total_tokens)], ["Costo con subagentes", fmtUsd(d.total_cost)]] : []),
+       ["Llamadas LLM", fmtInt(d.llm_calls)], ["Llamadas a tools", fmtInt(d.tool_calls)],
+       ["Instancias", fmtInt(d.instances)], ["Sesiones", fmtInt(d.sessions)], ["Modelos", d.models.join(", ") || "—"]];
+  render(d.label, rows);
+}
+
+function showEdge(d) {
+  const src = cy.getElementById(d.source).data("label"), dst = cy.getElementById(d.target).data("label");
+  render(`${src}\n→ ${dst}`, [["Lanzamientos", fmtInt(d.launches)],
+    ...(d.target.startsWith("tool:") ? [] : [["Tokens", fmtInt(d.tokens)], ["Costo", fmtUsd(d.cost)]])]);
+}
+
+function render(title, rows) {
+  const side = document.getElementById("side");
+  const esc = (s) => String(s).replace(/[&<>]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" })[c]);
+  side.innerHTML = `<h2>${esc(title)}</h2><dl>${rows.map(([k, v]) => `<dt>${esc(k)}</dt><dd>${esc(v)}</dd>`).join("")}</dl>` +
+    `<div class="legend" id="legend">${document.getElementById("legend")?.innerHTML ?? ""}</div>`;
+}
+
+cy.on("tap", "node", (e) => showNode(e.target.data()));
+cy.on("tap", "edge", (e) => showEdge(e.target.data()));
+cy.on("mouseover", "node", (e) => {
+  cy.elements().addClass("faded");
+  e.target.closedNeighborhood().removeClass("faded");
+});
+cy.on("mouseout", "node", () => cy.elements().removeClass("faded"));
+
+document.getElementById("metric").onchange = (e) => sizeBy(e.target.value);
+document.getElementById("dir").onchange = relayout;
+const showTools = (on) => cy.nodes("[kind = 'tool']").style("display", on ? "element" : "none");
+document.getElementById("tools").onchange = (e) => { showTools(e.target.checked); relayout(); };
+document.getElementById("q").oninput = (e) => {
+  const q = e.target.value.trim().toLowerCase();
+  cy.elements().removeClass("faded");
+  if (!q) return;
+  const hit = cy.nodes().filter((n) => n.data("label").toLowerCase().includes(q));
+  cy.elements().not(hit.closedNeighborhood()).addClass("faded");
+};
+
+showTools(false);
+sizeBy("self_tokens");
+relayout();
+</script>
+</body>
+</html>
