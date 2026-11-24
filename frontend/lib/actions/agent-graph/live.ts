@@ -28,7 +28,8 @@ export async function getAgentGraphLive(input: z.infer<typeof GetAgentGraphLiveS
       JSONExtractRaw(attributes, 'live.marker') AS live_marker
     FROM spans
     WHERE start_time >= now() - INTERVAL {minutes:UInt32} MINUTE
-    ORDER BY start_time
+    -- A tool's marker and its span share a start time; the marker happened first.
+    ORDER BY start_time, live_marker DESC
     LIMIT 20000
   `;
   const rows = await executeQuery<LiveSpanRow>({
