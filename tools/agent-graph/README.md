@@ -35,6 +35,8 @@ Invariantes que comprueba la verificación:
 - la suma de `self_tokens` de todos los nodos es igual a `sum(total_tokens)` de los spans LLM filtrados;
 - para cada subagente, la suma de tokens de sus aristas entrantes es igual a su `self_tokens`.
 
+Si un turno aparece exportado más de una vez (la misma raíz `Claude Code - Turn N` en una sesión con varios `trace_id`), el script lo advierte por stderr y lo deja en `meta.duplicate_turns`. Mientras esas trazas sobrantes no se borren, los totales salen inflados. La causa es el timeout del plugin; ver `tools/claude-code-lmnr/`.
+
 ## Librería
 
 Cytoscape.js 3.35.0 con `cytoscape-dagre` 4.1.0, por CDN y sin build. La comparación está en [RESEARCH.md](RESEARCH.md).

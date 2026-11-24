@@ -104,6 +104,16 @@ def fetch_spans(args, url: str, user: str, password: str, container: str) -> lis
     return query(url, user, password, container, sql)
 
 
+def find_duplicate_turns(spans: list[dict]) -> list[dict]:
+    """Turns exported more than once (the plugin re-sends a batch whose export timed out after the server took it)."""
+    traces = defaultdict(set)
+    for s in spans:
+        if s["name"].startswith(ROOT_PREFIX):
+            traces[(s["session_id"], s["name"])].add(s["trace_id"])
+    return [{"session_id": sid, "turn": name, "trace_ids": sorted(ids)}
+            for (sid, name), ids in sorted(traces.items()) if len(ids) > 1]
+
+
 def short_project(cwd: str) -> str:
     return Path(cwd).name if cwd else "unknown"
 
@@ -263,6 +273,11 @@ def main() -> int:
         return 1
     graph = build_graph(spans, args.mode, args.tools)
     graph["meta"]["filters"] = {k: getattr(args, k) for k in ("session", "project", "since", "tools")}
+    dupes = graph["meta"]["duplicate_turns"] = find_duplicate_turns(spans)
+    for d in dupes:
+        print(f"warning: {d['turn']} exported {len(d['trace_ids'])} times (session {d['session_id']}): "
+              f"{', '.join(d['trace_ids'])}; totals are inflated until the extra traces are deleted",
+              file=sys.stderr)
 
     out = Path(args.out)
     out.parent.mkdir(parents=True, exist_ok=True)
