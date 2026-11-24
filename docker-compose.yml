@@ -1,11 +1,32 @@
 # This compose file is a lightweight version of docker-compose-full.yml.
 # It is intended to be used for local quickstarts.
-# It does not include RabbitMQ.
-# It only includes frontend, clickhouse, postgres, and app-server.
+# It includes frontend, clickhouse, postgres, quickwit, rabbitmq, and app-server.
+# RabbitMQ gives app-server a durable span queue, so spans already acknowledged
+# to the client survive an app-server restart (the in-memory queue drops them).
 
 name: lmnr
 
 services:
+  rabbitmq:
+    image: rabbitmq:4
+    pull_policy: always
+    # Fixed hostname: RabbitMQ stores data under its node name (rabbit@<hostname>),
+    # so a random container hostname would orphan the volume on every recreate.
+    hostname: rabbitmq
+    volumes:
+      - rabbitmq-data:/var/lib/rabbitmq
+      - type: bind
+        source: ./rabbitmq-lmnr.conf
+        target: /etc/rabbitmq/conf.d/90-lmnr.conf
+    environment:
+      RABBITMQ_DEFAULT_USER: ${RABBITMQ_DEFAULT_USER}
+      RABBITMQ_DEFAULT_PASS: ${RABBITMQ_DEFAULT_PASS}
+    healthcheck:
+      test: rabbitmq-diagnostics -q check_running && rabbitmq-diagnostics -q check_local_alarms
+      interval: 10s
+      timeout: 10s
+      retries: 3
+
   postgres:
     image: postgres:16
     pull_policy: always
@@ -134,6 +155,8 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
       clickhouse:
         condition: service_started
       quickwit:
@@ -142,21 +165,24 @@ services:
       PORT: 8000
       NEXT_INTERNAL_URL: http://frontend:5667
       GRPC_PORT: 8001
-      HTTP_PAYLOAD_LIMIT: ${HTTP_PAYLOAD_LIMIT:-52428800} # 50 MB; the Claude Code plugin sends up to 16 MiB batches
+      # 50 MB; the Claude Code plugin sends up to 16 MiB batches. Keep below max_message_size in rabbitmq-lmnr.conf.
+      HTTP_PAYLOAD_LIMIT: ${HTTP_PAYLOAD_LIMIT:-52428800}
       DATABASE_URL: postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
+      RABBITMQ_URL: amqp://${RABBITMQ_DEFAULT_USER}:${RABBITMQ_DEFAULT_PASS}@rabbitmq:5672/%2f
       SHARED_SECRET_TOKEN: ${SHARED_SECRET_TOKEN}
       CLICKHOUSE_URL: http://clickhouse:8123
       CLICKHOUSE_USER: ${CLICKHOUSE_USER}
       CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD}
       CLICKHOUSE_RO_USER: ${CLICKHOUSE_RO_USER}
       CLICKHOUSE_RO_PASSWORD: ${CLICKHOUSE_RO_PASSWORD}
-      ENVIRONMENT: LITE # this disables runtime dependency on rabbitmq
+      ENVIRONMENT: FULL # with RABBITMQ_URL, uses RabbitMQ instead of the in-memory queue
       AEAD_SECRET_KEY: ${AEAD_SECRET_KEY}
       QUICKWIT_SEARCH_URL: http://quickwit:7280
       QUICKWIT_INGEST_URL: http://quickwit:7281
       QUICKWIT_SPANS_INDEX_ID: spans_v2
 
 volumes:
+  rabbitmq-data:
   postgres-data:
   clickhouse-data:
   clickhouse-logs:
