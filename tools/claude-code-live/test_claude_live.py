@@ -103,6 +103,17 @@ class TrackerTest(unittest.TestCase):
         arr = next(a for a in span["attributes"] if a["key"] == "lmnr.span.ids_path")
         self.assertIn("arrayValue", arr["value"])
 
+    def test_root_carries_delegation_graph(self):
+        _, out, _ = run(EVENTS)
+        root = next(s for s in out if not s["parent_hex"])["attrs"]
+        nodes = {n["id"]: n["data"] for n in json.loads(root["lmnr.association.properties.langgraph.nodes"])}
+        edges = {(e["source"], e["target"]) for e in json.loads(root["lmnr.association.properties.langgraph.edges"])}
+        self.assertEqual(nodes["main"], "Main · repo")
+        self.assertEqual(nodes[A], "Explore: look")
+        self.assertEqual(nodes[f"{A}:Bash"], "Bash ×1 · ✕1")
+        self.assertNotIn("main:Agent", nodes)
+        self.assertLessEqual({("main", A), (A, f"{A}:Bash"), ("main", "main:Bash"), ("main", "__end__")}, edges)
+
     def test_bad_event_is_ignored(self):
         t = cl.Tracker(lambda s: None)
         t.handle({"hook_event_name": "PreToolUse"}, 1)  # no session_id

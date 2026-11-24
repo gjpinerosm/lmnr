@@ -89,7 +89,36 @@ class Turn:
         self.start_ns = start_ns
         self.prompt: str | None = None
         self.closed = False
+        self.cwd = ""
+        # Delegation graph for Laminar's trace-view graph panel: agent_id ("" = main) -> label/parent,
+        # and per-agent tool counts [calls, errors].
+        self.graph_agents: dict[str, dict] = {"": {"label": "Main", "parent": None}}
+        self.tool_counts: dict[tuple[str, str], list[int]] = {}
         self.root = Node(hex_id(self.trace_hex, "root"), f"Claude Code - Live ({session_id[:8]})", [])
+
+
+GRAPH_SKIP_TOOLS = {"Agent", "SubagentHandback"}  # shown as delegation edges instead
+
+
+def turn_graph(turn: Turn) -> dict:
+    """The turn's agents and tools in the LangGraph shape Laminar's trace view renders as a graph."""
+    project = os.path.basename(turn.cwd.rstrip("/")) if turn.cwd else ""
+    nodes = [{"id": "__start__", "type": "schema", "data": "__start__"}]
+    edges = [{"source": "__start__", "target": "main"}]
+    for aid, a in turn.graph_agents.items():
+        nid = aid or "main"
+        label = f"Main · {project}" if not aid and project else a["label"]
+        nodes.append({"id": nid, "type": "runnable", "data": label})
+        if aid:
+            edges.append({"source": a["parent"] or "main", "target": nid, "data": "Agent"})
+    for (aid, tool), (n, err) in sorted(turn.tool_counts.items()):
+        nid = f"{aid or 'main'}:{tool}"
+        nodes.append({"id": nid, "type": "runnable", "data": f"{tool} ×{n}" + (f" · ✕{err}" if err else "")})
+        edges.append({"source": aid or "main", "target": nid})
+    nodes.append({"id": "__end__", "type": "schema", "data": "__end__"})
+    edges.append({"source": "main", "target": "__end__"})
+    return {"lmnr.association.properties.langgraph.nodes": json.dumps(nodes, ensure_ascii=False),
+            "lmnr.association.properties.langgraph.edges": json.dumps(edges, ensure_ascii=False)}
 
 
 class Tracker:
@@ -140,6 +169,8 @@ class Tracker:
         t = self.turns.get(key)
         if t is None:
             t = self.turns[key] = Turn(key[0], key[1], ts)
+        if p.get("cwd") and not p.get("agent_id"):
+            t.cwd = p["cwd"]
         return t
 
     def _chain(self, p: dict, turn: Turn) -> list[Node]:
@@ -216,7 +247,8 @@ class Tracker:
             self.tools[tid] = (ts, node)
             ti = p.get("tool_input") or {}
             key = (turn.session_id, p.get("agent_id") or "")
-            self.launches.setdefault(key, []).append((ti.get("subagent_type") or "general-purpose", tid, node))
+            self.launches.setdefault(key, []).append(
+                (ti.get("subagent_type") or "general-purpose", tid, node, ti.get("description") or ""))
         else:
             self.tools[tid] = (ts, None)
         self._set_state(p, ts, "tool_running", tool=tool, tool_use_id=tid, trace_id=turn.trace_hex)
@@ -235,6 +267,10 @@ class Tracker:
             attrs["claude_code.is_interrupt"] = True
         self._span(turn, self._chain(p, turn), hex_id(tid), tool, start, ts, p, "TOOL", attrs,
                    input=p.get("tool_input"), output=p.get("tool_response"), error=error)
+        if tool not in GRAPH_SKIP_TOOLS:
+            c = turn.tool_counts.setdefault((p.get("agent_id") or "", tool), [0, 0])
+            c[0] += 1
+            c[1] += error is not None
         self._set_state(p, ts, "thinking", tool=None, tool_use_id=None)
 
     def on_PostToolUse(self, p, ts):
@@ -270,15 +306,17 @@ class Tracker:
         turn = self._turn(p, ts)
         aid, atype = p.get("agent_id", ""), p.get("agent_type", "")
         # The launching agent is not in the payload: match the oldest pending Agent call of the same type.
-        parent_chain = [turn.root]
+        parent_chain, parent_aid, desc = [turn.root], "", ""
         for key, queue in self.launches.items():
             if key[0] != turn.session_id:
                 continue
             hit = next((x for x in queue if x[0] == atype), None)
             if hit:
                 queue.remove(hit)
-                parent_chain = hit[2].path()
+                parent_chain, parent_aid, desc = hit[2].path(), key[1], hit[3]
                 break
+        label = f"{atype}: {desc[:40]}" if desc else atype
+        turn.graph_agents[aid] = {"label": label, "parent": parent_aid}
         node = Node(hex_id(turn.trace_hex, "agent", aid), f"Subagent: {atype}", parent_chain)
         self.agents[aid] = node
         self.agent_start[aid] = ts
@@ -316,8 +354,10 @@ class Tracker:
         if turn.closed:
             return
         turn.closed = True
-        self._span(turn, [], turn.root.span_hex, turn.root.name, turn.start_ns, ts, p,
-                   attrs={"claude_code.git_branch": p.get("git_branch", "")} if p.get("git_branch") else None,
+        attrs = turn_graph(turn)
+        if p.get("git_branch"):
+            attrs["claude_code.git_branch"] = p["git_branch"]
+        self._span(turn, [], turn.root.span_hex, turn.root.name, turn.start_ns, ts, p, attrs=attrs,
                    input=turn.prompt, output=output)
 
     def on_Stop(self, p, ts):
