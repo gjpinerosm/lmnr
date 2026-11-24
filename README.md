@@ -33,6 +33,75 @@
 
 ![Traces](./images/trace-screenshot.png)
 
+## Este fork (`gjpinerosm/lmnr`)
+
+Laminar self-hosted para observar a Claude Code: cuánto consume cada agente y qué está haciendo en este momento. Los cambios viven en el fork y no se envían a Laminar. Rama principal del trabajo: `feat/agent-graph-page`.
+
+### Qué agrega
+
+| Feature | Dónde | Qué hace |
+|---|---|---|
+| **Agent graph** | Menú lateral → *Agent graph* (`frontend/components/agent-graph/`) | Grafo de agentes dentro de Laminar. **Histórico:** quién lanza a quién y cuánto consume cada tipo de agente (tokens, costo, modelo) en el rango elegido. **En vivo:** los agentes activos se sombrean según su estado (`tool_running`, `thinking`, `awaiting_permission`, `compacting`, `error`), muestran la herramienta en curso y su tiempo, y las aristas de los lanzamientos activos se animan. |
+| **claude-code-live** | `tools/claude-code-live/` | Daemon local que recibe los hooks de Claude Code en el momento y manda spans a un proyecto aparte (`claude-live`). Es la fuente de la capa en vivo. |
+| **agent-graph CLI** | `tools/agent-graph/` | `extract.py` genera un grafo HTML autónomo y un Sankey de consumo desde ClickHouse, sin el frontend. |
+| **Hooks del plugin** | `tools/claude-code-lmnr/` | Timeout de exportación configurable para `lmnr@lmnr` (evita turnos duplicados) y aviso cuando una exportación falla. |
+| **Ajustes de compose** | `docker-compose.yml` | Cola durable de RabbitMQ, `HTTP_PAYLOAD_LIMIT` de 50 MB para los lotes del plugin y `NEXT_INTERNAL_URL` para app-server. |
+| **Acceso por red local** | `frontend/next.config.ts`, `frontend/.env.local` | Abrir el frontend de desarrollo desde otros equipos de la red. |
+| **Backlog de seguridad** | `docs/fork/security-backlog.md` | Hallazgos pendientes (SEC-1 a SEC-4). Leer antes de exponer el stack en la red. |
+
+### Cómo iniciar
+
+Requisitos: Docker, Node 26, Python 3 y `jq`.
+
+**1. El stack** (Postgres, ClickHouse, RabbitMQ, Quickwit, app-server y frontend oficial):
+
+```sh
+docker compose up -d
+```
+
+- La UI oficial queda en http://localhost:5667. **Esa imagen no trae la página Agent graph**: para verla, usar el frontend de desarrollo del paso 2.
+- `docker-compose.override.yml` se aplica solo y publica ClickHouse en `127.0.0.1:8123` para el frontend de desarrollo.
+- `.env` en la raíz lleva las credenciales (`POSTGRES_*`, `CLICKHOUSE_*`, `RABBITMQ_DEFAULT_*`, `SHARED_SECRET_TOKEN`, `AEAD_SECRET_KEY`, `NEXTAUTH_SECRET`).
+
+**2. Frontend con Agent graph** (puerto 3000):
+
+```sh
+cd frontend
+cp .env.local.example .env.local        # y completar, ver abajo
+npx -y pnpm@12.14.0 install --frozen-lockfile
+env -u PORT PORT=3000 npx -y pnpm@12.14.0 run dev
+```
+
+En `frontend/.env.local`, con los mismos valores del `.env` de la raíz:
+- `DATABASE_URL=postgres://<user>:<password>@localhost:5433/<db>` y `CLICKHOUSE_URL=http://localhost:8123`, con `CLICKHOUSE_USER` / `CLICKHOUSE_PASSWORD`;
+- `BACKEND_URL=http://localhost:8000` y `BACKEND_RT_URL=http://localhost:8002`;
+- `BETTER_AUTH_URL`, `NEXTAUTH_URL` y `NEXT_PUBLIC_URL` en `http://localhost:3000`;
+- `NEXTAUTH_SECRET` y `BETTER_AUTH_SECRET` iguales al `NEXTAUTH_SECRET` del compose, para que una sesión sirva en los dos frontends.
+
+Abrir http://localhost:3000, iniciar sesión con el correo y entrar a *Agent graph* en el proyecto donde exporta el plugin. El selector de proyecto en vivo usa por defecto el proyecto llamado `claude-live`.
+
+**3. Datos de Claude Code:**
+- **Histórico:** plugin `lmnr@lmnr` apuntando a `http://localhost:8000` con la clave del proyecto (por ejemplo `dev`). Hooks recomendados: [`tools/claude-code-lmnr/README.md`](tools/claude-code-lmnr/README.md).
+- **En vivo:** crear el proyecto `claude-live` y su clave, y seguir [`tools/claude-code-live/README.md`](tools/claude-code-live/README.md). El daemon arranca solo en cada `SessionStart`; `python3 ~/.claude/hooks/claude-live/claude_live.py status` muestra qué ve.
+
+**4. Desde otros equipos de la red (opcional):** agregar en `frontend/.env.local` y reiniciar el paso 2:
+
+```sh
+ALLOWED_DEV_ORIGINS=<ip-del-mac>
+BETTER_AUTH_TRUSTED_ORIGINS=http://<ip-del-mac>:3000
+```
+
+y abrir `http://<ip-del-mac>:3000`. El login local solo pide un correo, así que cualquiera en la red puede entrar como cualquier usuario: usarlo solo en una red de confianza (SEC-4).
+
+**Tests:**
+
+```sh
+(cd frontend && npx tsx --test tests/agent-graph.test.ts)
+python3 -m unittest tools/claude-code-live/test_claude_live.py
+```
+
+**Apagar:** `docker compose down` (los datos quedan en los volúmenes) y `Ctrl+C` en el frontend de desarrollo.
+
 ## Documentation
 
 Check out the full documentation here [laminar.sh/docs](https://laminar.sh/docs).
