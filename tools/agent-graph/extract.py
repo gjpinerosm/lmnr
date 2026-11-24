@@ -81,6 +81,8 @@ def fetch_spans(args, url: str, user: str, password: str, container: str) -> lis
         )
     if args.since:
         root_filters.append(f"start_time >= parseDateTimeBestEffort({sql_str(args.since)})")
+    if args.until:
+        root_filters.append(f"start_time < parseDateTimeBestEffort({sql_str(args.until)})")
 
     sql = f"""
         SELECT
@@ -156,7 +158,8 @@ def build_graph(spans: list[dict], mode: str, with_tools: bool) -> dict:
         node = nodes.get(key)
         if node is None:
             node = nodes[key] = {"id": key, **info, "self_tokens": 0, "self_cost": 0.0, "llm_calls": 0,
-                                 "tool_calls": 0, "instances": set(), "sessions": set(), "models": set()}
+                                 "tool_calls": 0, "instances": set(), "sessions": set(), "models": set(),
+                                 "by_model": defaultdict(lambda: {"tokens": 0, "cost": 0.0, "llm_calls": 0})}
         return node
 
     span_node: dict[str, str] = {}
@@ -192,6 +195,10 @@ def build_graph(spans: list[dict], mode: str, with_tools: bool) -> dict:
             node["llm_calls"] += 1
             if s["model"]:
                 node["models"].add(s["model"])
+            per_model = node["by_model"][s["model"] or "unknown"]
+            per_model["tokens"] += int(s["total_tokens"])
+            per_model["cost"] += float(s["total_cost"])
+            per_model["llm_calls"] += 1
         elif s["span_type"] == TOOL_SPAN_TYPE:
             nodes[own_key]["tool_calls"] += 1
             if with_tools and s["tool_name"] not in ("Agent", "Task"):
@@ -222,11 +229,15 @@ def build_graph(spans: list[dict], mode: str, with_tools: bool) -> dict:
         e["tokens"] = sum(instance_usage[i][0] for i in launched)
         e["cost"] = round(sum(instance_usage[i][1] for i in launched), 6)
 
+    flow = build_flow(spans, roots, owner, instance_usage)
+
     out_nodes = []
     for key, n in nodes.items():
         total_tokens, total_cost = subtree(key, frozenset({key})) if mode == "session" else (n["self_tokens"], n["self_cost"])
         out_nodes.append({
-            **{k: v for k, v in n.items() if k not in ("instances", "sessions", "models")},
+            **{k: v for k, v in n.items() if k not in ("instances", "sessions", "models", "by_model")},
+            "by_model": {m: {**u, "cost": round(u["cost"], 6)}
+                         for m, u in sorted(n["by_model"].items(), key=lambda kv: -kv[1]["tokens"])},
             "self_cost": round(n["self_cost"], 6),
             "total_tokens": total_tokens,
             "total_cost": round(total_cost, 6),
@@ -236,10 +247,13 @@ def build_graph(spans: list[dict], mode: str, with_tools: bool) -> dict:
         })
 
     llm = [s for s in spans if s["span_type"] == LLM_SPAN_TYPE]
+    starts = sorted(r["start_time"] for r in roots.values())
     return {
         "meta": {
             "generated_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
             "mode": mode,
+            "first_turn": starts[0] if starts else None,
+            "last_turn": starts[-1] if starts else None,
             "traces": len(roots),
             "sessions": len({r["session_id"] for r in roots.values()}),
             "llm_calls": len(llm),
@@ -248,7 +262,64 @@ def build_graph(spans: list[dict], mode: str, with_tools: bool) -> dict:
         },
         "nodes": sorted(out_nodes, key=lambda n: -n["self_tokens"]),
         "edges": list(edges.values()),
+        "flow": flow,
     }
+
+
+OWN_USAGE = "Consumo propio"
+
+
+def build_flow(spans: list[dict], roots: dict, owner, instance_usage: dict) -> list[dict]:
+    """Sankey links between agents, keyed by (type, nesting level) so the flow is acyclic even when a
+    type launches itself. A launch link carries everything the launched instance consumed, its own
+    subagents included; every agent also links to a shared sink with its own consumption."""
+    label: dict[str, str] = {}
+    parent: dict[str, str] = {}
+    for r in roots.values():
+        label[r["span_id"]] = f"Main · {short_project(r['cwd'])}"
+    subagents = [s for s in spans if s["name"].startswith(SUBAGENT_PREFIX)]
+    for s in subagents:
+        own = owner(s)
+        if own is not None:
+            parent[s["span_id"]] = own["span_id"]
+
+    def depth(span_id: str) -> int:
+        d = 0
+        while span_id in parent:
+            span_id, d = parent[span_id], d + 1
+        return d
+
+    for s in subagents:
+        if s["span_id"] in parent:
+            label[s["span_id"]] = f"{s['subagent_type'] or 'unknown'} · nivel {depth(s['span_id'])}"
+
+    children = defaultdict(list)
+    for child, par in parent.items():
+        children[par].append(child)
+
+    def total(span_id: str) -> tuple[int, float]:
+        tok, cost = instance_usage[span_id]
+        for c in children[span_id]:
+            ct, cc = total(c)
+            tok, cost = tok + ct, cost + cc
+        return tok, cost
+
+    links: dict[tuple[str, str], dict] = {}
+
+    def add(src: str, dst: str, tok: int, cost: float, launches: int) -> None:
+        link = links.setdefault((src, dst), {"source": src, "target": dst, "tokens": 0, "cost": 0.0, "launches": 0})
+        link["tokens"] += tok
+        link["cost"] += cost
+        link["launches"] += launches
+
+    for child, par in parent.items():
+        if par in label and child in label:
+            add(label[par], label[child], *total(child), 1)
+    for span_id, name in label.items():
+        tok, cost = instance_usage[span_id]
+        if tok or cost:
+            add(name, OWN_USAGE, tok, cost, 0)
+    return [{**l, "cost": round(l["cost"], 6)} for l in links.values()]
 
 
 def main() -> int:
@@ -258,6 +329,7 @@ def main() -> int:
     parser.add_argument("--session", help="session id or prefix")
     parser.add_argument("--project", help="substring of the session's working directory")
     parser.add_argument("--since", help="only turns started at/after this date (e.g. 2026-11-20)")
+    parser.add_argument("--until", help="only turns started before this date (e.g. 2026-11-23)")
     parser.add_argument("--tools", action="store_true", help="add tool nodes (Bash, Edit, MCP...)")
     parser.add_argument("--out", default=str(HERE / "out" / "graph.json"), help="graph JSON path")
     parser.add_argument("--html", default=str(HERE / "out" / "agent-graph.html"),
@@ -272,7 +344,7 @@ def main() -> int:
         print("no Claude Code traces match the filters", file=sys.stderr)
         return 1
     graph = build_graph(spans, args.mode, args.tools)
-    graph["meta"]["filters"] = {k: getattr(args, k) for k in ("session", "project", "since", "tools")}
+    graph["meta"]["filters"] = {k: getattr(args, k) for k in ("session", "project", "since", "until", "tools")}
     dupes = graph["meta"]["duplicate_turns"] = find_duplicate_turns(spans)
     for d in dupes:
         print(f"warning: {d['turn']} exported {len(d['trace_ids'])} times (session {d['session_id']}): "

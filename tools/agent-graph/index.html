@@ -6,6 +6,7 @@
 <title>Grafo de agentes · Laminar</title>
 <script src="https://cdn.jsdelivr.net/npm/cytoscape@3.35.0/dist/cytoscape.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/cytoscape-dagre@4.1.0/dist/cytoscape-dagre.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/echarts@6.1.0/dist/echarts.min.js"></script>
 <style>
   :root {
     --bg: #fbfaf8; --panel: #ffffff; --ink: #1d1d1b; --muted: #6b6a66; --line: #e4e2dd;
@@ -28,7 +29,17 @@
   select, input[type=search] { font: inherit; color: var(--ink); background: var(--bg);
            border: 1px solid var(--line); border-radius: 6px; padding: 4px 8px; }
   main { display: grid; grid-template-columns: 1fr 300px; min-height: 0; }
-  #cy { min-height: 0; }
+  .stage { position: relative; min-height: 0; }
+  #cy, #flow { position: absolute; inset: 0; }
+  #flow { visibility: hidden; }
+  .tabs { display: flex; border: 1px solid var(--line); border-radius: 6px; overflow: hidden; }
+  .tabs button { font: inherit; color: var(--muted); background: var(--bg); border: 0; padding: 4px 10px; cursor: pointer; }
+  .tabs button + button { border-left: 1px solid var(--line); }
+  .tabs button[aria-selected="true"] { color: var(--ink); background: var(--panel); font-weight: 600; }
+  aside table { width: 100%; margin-top: 16px; border-collapse: collapse; font-variant-numeric: tabular-nums; font-size: 12px; }
+  aside th, aside td { padding: 4px 0; border-bottom: 1px solid var(--line); text-align: right; }
+  aside th:first-child, aside td:first-child { text-align: left; padding-right: 8px; overflow-wrap: anywhere; }
+  aside th { color: var(--muted); font-weight: 500; }
   aside { border-left: 1px solid var(--line); background: var(--panel); padding: 16px 18px; overflow: auto; }
   aside h2 { font-size: 13px; margin: 0 0 10px; font-weight: 600; white-space: pre-line; }
   aside dl { display: grid; grid-template-columns: auto 1fr; gap: 6px 12px; margin: 0;
@@ -46,6 +57,10 @@
   <h1>Grafo de agentes</h1>
   <div class="stats" id="stats"></div>
   <div class="controls">
+    <div class="tabs" role="tablist">
+      <button role="tab" aria-selected="true" data-view="graph">Grafo</button>
+      <button role="tab" aria-selected="false" data-view="flow">Flujo de consumo</button>
+    </div>
     <label>Tamaño <select id="metric"><option value="self_tokens">tokens</option><option value="self_cost">costo</option><option value="llm_calls">llamadas LLM</option></select></label>
     <label>Dirección <select id="dir"><option value="LR">→</option><option value="TB">↓</option></select></label>
     <label><input type="checkbox" id="tools"> tools</label>
@@ -53,7 +68,7 @@
   </div>
 </header>
 <main>
-  <div id="cy"></div>
+  <div class="stage"><div id="cy"></div><div id="flow"></div></div>
   <aside id="side"><p class="hint">Haz clic en un nodo o arista para ver su consumo.</p><div class="legend" id="legend"></div></aside>
 </main>
 <script>
@@ -77,7 +92,8 @@ const m = GRAPH.meta;
 document.getElementById("stats").innerHTML =
   `<span><b>${m.sessions}</b> sesiones</span><span><b>${fmtInt(m.traces)}</b> turnos</span>` +
   `<span><b>${fmtInt(m.llm_calls)}</b> llamadas LLM</span><span><b>${fmtTok(m.total_tokens)}</b> tokens</span>` +
-  `<span><b>${fmtUsd(m.total_cost)}</b></span><span>vista: <b>${m.mode === "types" ? "por tipo" : "por sesión"}</b></span>`;
+  `<span><b>${fmtUsd(m.total_cost)}</b></span><span>vista: <b>${m.mode === "types" ? "por tipo" : "por sesión"}</b></span>` +
+  (m.first_turn ? `<span><b>${m.first_turn.slice(0, 10)}</b> → <b>${m.last_turn.slice(0, 10)}</b></span>` : "");
 document.getElementById("legend").innerHTML =
   `<div><span style="background:${css("--main")}"></span>agente principal</div>` +
   types.map((t) => `<div><span style="background:${typeColor[t]}"></span>${t}</div>`).join("") +
@@ -129,8 +145,16 @@ function showNode(d) {
     : [["Tokens propios", fmtInt(d.self_tokens)], ["Costo propio", fmtUsd(d.self_cost)],
        ...(m.mode === "session" ? [["Tokens con subagentes", fmtInt(d.total_tokens)], ["Costo con subagentes", fmtUsd(d.total_cost)]] : []),
        ["Llamadas LLM", fmtInt(d.llm_calls)], ["Llamadas a tools", fmtInt(d.tool_calls)],
-       ["Instancias", fmtInt(d.instances)], ["Sesiones", fmtInt(d.sessions)], ["Modelos", d.models.join(", ") || "—"]];
-  render(d.label, rows);
+       ["Instancias", fmtInt(d.instances)], ["Sesiones", fmtInt(d.sessions)]];
+  render(d.label, rows, d.kind === "tool" ? "" : modelTable(d.by_model || {}));
+}
+
+function modelTable(byModel) {
+  const rows = Object.entries(byModel);
+  if (!rows.length) return "";
+  return `<table><thead><tr><th>Modelo</th><th>Tokens</th><th>Costo</th><th>LLM</th></tr></thead><tbody>` +
+    rows.map(([model, u]) => `<tr><td>${esc(model)}</td><td>${fmtTok(u.tokens)}</td><td>${fmtUsd(u.cost)}</td>` +
+      `<td>${fmtInt(u.llm_calls)}</td></tr>`).join("") + `</tbody></table>`;
 }
 
 function showEdge(d) {
@@ -139,11 +163,14 @@ function showEdge(d) {
     ...(d.target.startsWith("tool:") ? [] : [["Tokens", fmtInt(d.tokens)], ["Costo", fmtUsd(d.cost)]])]);
 }
 
-function render(title, rows) {
+function esc(s) {
+  return String(s).replace(/[&<>]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" })[c]);
+}
+
+function render(title, rows, extraHtml = "") {
   const side = document.getElementById("side");
-  const esc = (s) => String(s).replace(/[&<>]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" })[c]);
   side.innerHTML = `<h2>${esc(title)}</h2><dl>${rows.map(([k, v]) => `<dt>${esc(k)}</dt><dd>${esc(v)}</dd>`).join("")}</dl>` +
-    `<div class="legend" id="legend">${document.getElementById("legend")?.innerHTML ?? ""}</div>`;
+    extraHtml + `<div class="legend" id="legend">${document.getElementById("legend")?.innerHTML ?? ""}</div>`;
 }
 
 cy.on("tap", "node", (e) => showNode(e.target.data()));
@@ -154,7 +181,51 @@ cy.on("mouseover", "node", (e) => {
 });
 cy.on("mouseout", "node", () => cy.elements().removeClass("faded"));
 
-document.getElementById("metric").onchange = (e) => sizeBy(e.target.value);
+// Consumption flow (Sankey). Nodes are "<type> · nivel N" so the flow stays acyclic; a launch carries
+// everything the launched agent consumed, and every agent drains its own usage into one sink.
+let flowChart = null;
+const OWN_USAGE = "Consumo propio";
+const flowValue = () => document.getElementById("metric").value === "self_cost" ? "cost" : "tokens";
+function flowColor(name) {
+  if (name === OWN_USAGE) return css("--tool");
+  if (name.startsWith("Main · ")) return css("--main");
+  return typeColor[name.replace(/ · nivel \d+$/, "")] ?? css("--edge");
+}
+function renderFlow() {
+  if (!flowChart) {
+    flowChart = echarts.init(document.getElementById("flow"));
+    window.addEventListener("resize", () => flowChart.resize());
+    flowChart.on("click", (p) => p.dataType === "edge" && render(`${p.data.source}\n→ ${p.data.target}`, [
+      ["Tokens", fmtInt(p.data.tokens)], ["Costo", fmtUsd(p.data.cost)],
+      ...(p.data.launches ? [["Lanzamientos", fmtInt(p.data.launches)]] : [])]));
+  }
+  const key = flowValue();
+  const links = (GRAPH.flow || []).filter((l) => l[key] > 0).map((l) => ({ ...l, value: l[key] }));
+  const names = [...new Set(links.flatMap((l) => [l.source, l.target]))];
+  const fmt = key === "cost" ? fmtUsd : fmtTok;
+  flowChart.setOption({
+    tooltip: { trigger: "item", formatter: (p) => p.dataType === "edge"
+      ? `${esc(p.data.source)} → ${esc(p.data.target)}<br>${fmt(p.data.value)}` : `${esc(p.name)}<br>${fmt(p.value)}` },
+    series: [{
+      type: "sankey", left: 20, right: 150, top: 20, bottom: 20, nodeGap: 10, draggable: false,
+      emphasis: { focus: "adjacency" },
+      data: names.map((name) => ({ name, itemStyle: { color: flowColor(name), borderWidth: 0 } })),
+      links,
+      lineStyle: { color: "gradient", opacity: 0.35, curveness: 0.5 },
+      label: { color: css("--ink"), fontSize: 11 },
+    }],
+  }, true);
+}
+
+function showView(view) {
+  document.querySelectorAll(".tabs button").forEach((b) => b.setAttribute("aria-selected", String(b.dataset.view === view)));
+  document.getElementById("cy").style.visibility = view === "graph" ? "visible" : "hidden";
+  document.getElementById("flow").style.visibility = view === "flow" ? "visible" : "hidden";
+  if (view === "flow") renderFlow();
+}
+document.querySelectorAll(".tabs button").forEach((b) => { b.onclick = () => showView(b.dataset.view); });
+
+document.getElementById("metric").onchange = (e) => { sizeBy(e.target.value); if (flowChart) renderFlow(); };
 document.getElementById("dir").onchange = relayout;
 const showTools = (on) => cy.nodes("[kind = 'tool']").style("display", on ? "element" : "none");
 document.getElementById("tools").onchange = (e) => { showTools(e.target.checked); relayout(); };
