@@ -11,6 +11,8 @@ const basePath = process.env.NEXT_PUBLIC_BASE_PATH || undefined;
 const nextConfig: NextConfig = {
   basePath,
   deploymentId: process.env.NEXT_DEPLOYMENT_ID || undefined,
+  // `next dev` blocks its own scripts for any host but localhost; comma-separated hosts to allow (e.g. a LAN IP).
+  allowedDevOrigins: process.env.ALLOWED_DEV_ORIGINS?.split(",").filter(Boolean),
   env: {
     LAMINAR_CLOUD: process.env.LAMINAR_CLOUD,
   },

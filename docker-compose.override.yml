@@ -1,0 +1,7 @@
+# Local overrides for the fork, merged automatically by `docker compose`.
+# Delete this file to go back to the stock setup.
+services:
+  clickhouse:
+    # Only for running `pnpm dev` on the host against this stack.
+    ports:
+      - "127.0.0.1:8123:8123"

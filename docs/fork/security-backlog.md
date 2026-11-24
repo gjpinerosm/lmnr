@@ -45,3 +45,15 @@ The key was pasted into a Claude Code chat on 2026-11-24. That chat transcript i
 1. Create a new key in the `claude-live` project.
 2. Run `bash tools/claude-code-live/save-key.sh` and then copy the key.
 3. Delete the old key.
+
+## SEC-4: passwordless local login reachable from the LAN
+
+**Found:** 2026-11-24, while opening the dev frontend to other devices on the network.
+
+The local stack signs in through Better Auth's `local-email` endpoint (`lib/auth-local-email.ts`): it asks for an email only, no password. With `frontend/.env.local` setting `ALLOWED_DEV_ORIGINS=<lan-ip>` and `BETTER_AUTH_TRUSTED_ORIGINS=http://<lan-ip>:3000`, anyone on the same network can sign in as any user, the owner included, and read every trace.
+
+**Risk:** acceptable on a trusted home network; high anywhere else.
+
+**Fix (planned):**
+1. To close it now: remove both lines from `frontend/.env.local` and restart `pnpm run dev`.
+2. For LAN use that stays open: put a real IdP (GitHub/Google OAuth) in front, or a reverse proxy with basic auth, and turn local-email off.
