@@ -141,6 +141,7 @@ services:
     environment:
       PORT: 8000
       GRPC_PORT: 8001
+      HTTP_PAYLOAD_LIMIT: ${HTTP_PAYLOAD_LIMIT:-52428800} # 50 MB; the Claude Code plugin sends up to 16 MiB batches
       DATABASE_URL: postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
       SHARED_SECRET_TOKEN: ${SHARED_SECRET_TOKEN}
       CLICKHOUSE_URL: http://clickhouse:8123
