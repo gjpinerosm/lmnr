@@ -5,6 +5,7 @@ import {
   GitFork,
   LayoutDashboard,
   type LucideIcon,
+  Network,
   Pen,
   PlayCircle,
   Radio,
@@ -39,6 +40,7 @@ export const getSidebarMenus = (projectId: string): SidebarMenuGroup[] => [
     label: "Investigate",
     items: [
       { name: "Traces", href: `/project/${projectId}/traces`, icon: Rows4 },
+      { name: "Agent graph", href: `/project/${projectId}/agent-graph`, icon: Network },
       { name: "Signals", href: `/project/${projectId}/signals`, icon: Radio },
       { name: "SQL editor", href: `/project/${projectId}/sql`, icon: SquareTerminal },
       { name: "Agent versions", href: `/project/${projectId}/agent-versions`, icon: GitBranch, badge: "beta" },
