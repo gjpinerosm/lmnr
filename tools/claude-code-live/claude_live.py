@@ -132,7 +132,8 @@ class Tracker:
         self.tools: dict[str, tuple[int, Node | None]] = {}  # tool_use_id -> (start, Agent node)
         self.agents: dict[str, Node] = {}  # agent_id -> subagent node
         self.agent_start: dict[str, int] = {}
-        self.agent_meta: dict[str, dict] = {}  # agent_id -> launching agent and task description
+        self.agent_meta: dict[str, dict] = {}
+        self.session_cwd: dict[str, str] = {}  # agent_id -> launching agent and task description
         # Agent tool calls waiting for their SubagentStart, per (session, launching agent).
         self.launches: dict[tuple[str, str], list[tuple[str, str, Node]]] = {}
 
@@ -171,7 +172,8 @@ class Tracker:
         if t is None:
             t = self.turns[key] = Turn(key[0], key[1], ts)
         if p.get("cwd") and not p.get("agent_id"):
-            t.cwd = p["cwd"]
+            # The session's launch directory names its project; a later `cd` must not rename it.
+            t.cwd = self.session_cwd.setdefault(key[0], p["cwd"])
         return t
 
     def _chain(self, p: dict, turn: Turn) -> list[Node]:
@@ -237,6 +239,8 @@ class Tracker:
                 self._session(p, ts)
 
     def on_SessionStart(self, p, ts):
+        if p.get("cwd"):
+            self.session_cwd[p["session_id"]] = p["cwd"]
         self._set_state(p, ts, "idle", source=p.get("source", ""))
 
     def on_UserPromptSubmit(self, p, ts):
