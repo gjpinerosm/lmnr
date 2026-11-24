@@ -77,7 +77,9 @@ export function buildLiveGraph(rows: LiveSpanRow[], nowMs: number): LiveGraph {
     agent.description ||= r.agent_description || undefined;
 
     if (r.live_marker === "true") {
-      if (r.live_state) {
+      // A tool span and its marker share a start time, so the closed span can sort first.
+      const markerOfClosedTool = !!r.tool_use_id && closedTools.has(r.tool_use_id);
+      if (r.live_state && !markerOfClosedTool) {
         agent.state = r.live_state as LiveState;
         agent.sinceMs = startMs;
       }

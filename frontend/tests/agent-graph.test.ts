@@ -150,6 +150,19 @@ describe("buildLiveGraph", () => {
     assert.equal(g.agents.find((a) => a.agentId === "")!.state, "idle");
   });
 
+  it("ignores a tool marker that sorts after its own finished tool span", () => {
+    const g = buildLiveGraph(
+      [
+        marker(0, "▶ Prompt", "thinking"),
+        ls(1, "Read", { span_type: "TOOL", tool_use_id: "u9" }),
+        marker(1, "▶ Read", "tool_running", { tool_use_id: "u9", tool_name: "Read" }),
+      ],
+      NOW
+    );
+    const main = g.agents.find((a) => a.agentId === "")!;
+    assert.deepEqual([main.state, main.tool], ["thinking", undefined]);
+  });
+
   it("drops sessions quiet for more than ten minutes from the active set", () => {
     const g = buildLiveGraph(LIVE, NOW + 11 * 60 * 1000);
     assert.equal(g.sessions[0].active, false);
