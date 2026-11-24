@@ -114,6 +114,32 @@ class TrackerTest(unittest.TestCase):
         self.assertNotIn("main:Agent", nodes)
         self.assertLessEqual({("main", A), (A, f"{A}:Bash"), ("main", "main:Bash"), ("main", "__end__")}, edges)
 
+    def test_graph_attributes_on_nested_subagents(self):
+        B = "agent0002"
+        nested = [
+            ("UserPromptSubmit", {"prompt": "go"}),
+            ("PreToolUse", {"tool_name": "Agent", "tool_use_id": "a1",
+                            "tool_input": {"description": "plan it", "subagent_type": "Plan"}}),
+            ("SubagentStart", {"agent_id": A, "agent_type": "Plan"}),
+            ("PreToolUse", {"agent_id": A, "agent_type": "Plan", "tool_name": "Agent", "tool_use_id": "a2",
+                            "tool_input": {"description": "dig", "subagent_type": "Explore"}}),
+            ("SubagentStart", {"agent_id": B, "agent_type": "Explore"}),
+            ("PreToolUse", {"agent_id": B, "agent_type": "Explore", "tool_name": "Read", "tool_use_id": "r1",
+                            "tool_input": {"file_path": "/repo/a"}}),
+            ("SubagentStop", {"agent_id": B, "agent_type": "Explore"}),
+        ]
+        _, out, _ = run(nested)
+        read_marker = next(s["attrs"] for s in out if s["name"] == "▶ Read")
+        self.assertEqual(read_marker["claude_code.parent_agent_id"], A)
+        self.assertEqual(read_marker["claude_code.agent_description"], "dig")
+        self.assertEqual(read_marker["claude_code.tool.name"], "Read")
+        self.assertEqual(read_marker["claude_code.project"], "repo")
+        plan_start = next(s["attrs"] for s in out if s["name"] == "▶ Subagent start"
+                          and s["attrs"].get("claude_code.agent_id") == A)
+        self.assertEqual(plan_start["claude_code.parent_agent_id"], "")
+        explore_span = next(s["attrs"] for s in out if s["name"] == "Subagent: Explore")
+        self.assertEqual(explore_span["claude_code.parent_agent_id"], A)
+
     def test_bad_event_is_ignored(self):
         t = cl.Tracker(lambda s: None)
         t.handle({"hook_event_name": "PreToolUse"}, 1)  # no session_id

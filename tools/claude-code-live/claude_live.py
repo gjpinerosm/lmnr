@@ -132,6 +132,7 @@ class Tracker:
         self.tools: dict[str, tuple[int, Node | None]] = {}  # tool_use_id -> (start, Agent node)
         self.agents: dict[str, Node] = {}  # agent_id -> subagent node
         self.agent_start: dict[str, int] = {}
+        self.agent_meta: dict[str, dict] = {}  # agent_id -> launching agent and task description
         # Agent tool calls waiting for their SubagentStart, per (session, launching agent).
         self.launches: dict[tuple[str, str], list[tuple[str, str, Node]]] = {}
 
@@ -194,6 +195,14 @@ class Tracker:
         for k in ("agent_id", "agent_type", "permission_mode", "cwd"):
             if p.get(k):
                 a[f"claude_code.{k}"] = p[k]
+        if turn.cwd:
+            a.setdefault("claude_code.cwd", turn.cwd)
+            a["claude_code.project"] = os.path.basename(turn.cwd.rstrip("/"))
+        meta = self.agent_meta.get(p.get("agent_id") or "")
+        if meta:
+            a["claude_code.parent_agent_id"] = meta["parent"]
+            if meta["description"]:
+                a["claude_code.agent_description"] = meta["description"]
         if input is not None:
             a["lmnr.span.input"] = clip(input)
         if output is not None:
@@ -254,7 +263,7 @@ class Tracker:
         self._set_state(p, ts, "tool_running", tool=tool, tool_use_id=tid, trace_id=turn.trace_hex)
         # A child of the not-yet-sent tool span, so the tool renders as pending until it ends.
         self._marker(turn, node.path(), f"▶ {tool}", ts, p, "tool_running",
-                     input=p.get("tool_input"), attrs={"claude_code.tool_use_id": tid})
+                     input=p.get("tool_input"), attrs={"claude_code.tool_use_id": tid, "claude_code.tool.name": tool})
 
     def _end_tool(self, p, ts, error: str | None):
         turn = self._turn(p, ts)
@@ -317,6 +326,7 @@ class Tracker:
                 break
         label = f"{atype}: {desc[:40]}" if desc else atype
         turn.graph_agents[aid] = {"label": label, "parent": parent_aid}
+        self.agent_meta[aid] = {"parent": parent_aid, "description": desc}
         node = Node(hex_id(turn.trace_hex, "agent", aid), f"Subagent: {atype}", parent_chain)
         self.agents[aid] = node
         self.agent_start[aid] = ts
@@ -332,6 +342,7 @@ class Tracker:
         self._span(turn, node.chain, node.span_hex, node.name, self.agent_start.pop(aid, ts), ts, p,
                    attrs={"claude_code.subagent.type": p.get("agent_type", "")},
                    output=p.get("last_assistant_message"))
+        self.agent_meta.pop(aid, None)
         self._set_state(p, ts, "done")
 
     def on_PreCompact(self, p, ts):
